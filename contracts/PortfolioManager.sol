@@ -1,13 +1,13 @@
-pragma solidity ^0.5.17;
+pragma solidity 0.5.17;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeMath} from "@openzeppelin/contracts/math/SafeMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 
 import "../interfaces/Curve.sol";
 
-contract PortfolioManager {
+contract PortfolioManager is Ownable {
 
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -19,14 +19,16 @@ contract PortfolioManager {
     address constant public DAI = address(0x6b175474e89094c44da98b954eedeac495271d0f);
     address constant public susdPool = address(0xFCBa3E75865d2d561BE8D220616520c171F12851); // susd pool Deposit Contract
     address constant public yPool = address(0xbBC81d23Ea2c3ec7e56D39296F0cbB648873a5d3); // Y pool Deposit Contract
-    
+    address constant public sCRV = address(0xC25a3A3b969415c80451098fa907EC722572917F); // susd LP token
+    address constant public yCRV = address(0xdF5e0e81Dff6FAF3A7e52BA697820c5e32D806A8); // Y LP token
+
     // Pool arrays for verified and whitelisted Curve pools
     address[] public verifiedPools;
     address[] public whitelistedPools;
 
     // Pool weights
-    uint8 public susdWeight;
-    uint8 public yWeight;
+    uint public susdWeight;
+    uint public yWeight;
 
     // Pool DAI Liquidity
     uint256 public susdLiquidity;
@@ -34,12 +36,12 @@ contract PortfolioManager {
 
     // EVENTS
     event PoolWhitelisted(address indexed pool);
-    event PoolWeights(uint8 susdWeight, uint8 yWeight);
+    event PoolWeights(uint susdWeight, uint yWeight);
     event Deposit(address indexed sender, address indexed pool, uint256 amount);
     event Rebalance(uint256 amount, address indexed pool);
 
     // CONSTRUCTOR
-    constructor(uint8 _susdWeight, uint8 _yWeight) public {
+    constructor(uint _susdWeight, uint _yWeight) public {
         // Init contract owner
         owner = msg.sender;
         // Init susd and Y pool weights
@@ -100,37 +102,42 @@ contract PortfolioManager {
     * @param pool Address of the susd or Y pool deposit contracts
     * @return boolean value of true if execution was successful
     */
-    function addLiquidity(address pool) public returns (bool success) {
+    function addLiquidity(address pool, uint inAmount) public returns (bool) {
         // Verify pool address
         require(pool == susdPool || pool == yPool, "Error: Invalid pool address.")
         // DAI balance in user address.
         uint _dai = IERC20(DAI).balanceOf(msg.sender);
         // Deposit DAI in pools.
-        if (_dai > 0) {
+        if (_dai > inAmount) {
             // Deposit DAI in susd pool.
             if (pool == susdPool) {
                 // susd pool deposit
-                IERC20(DAI).safeTransferFrom(msg.sender, address(this), _dai);
-                ICurveDeposit(susdPool).add_liquidity([_dai,0,0,0], 0);
+                IERC20(DAI).safeTransferFrom(msg.sender, address(this), inAmount);
+                ICurveDeposit(susdPool).add_liquidity([inAmount,0,0,0], 0);
                 // Update susd pool Liquidity
-                susdLiquidity = susdLiquidity.add(_dai);
+                susdLiquidity = susdLiquidity.add(inAmount);
             }
             else if (pool == yPool){
                 // y pool deposit
-                IERC20(DAI).safeTransferFrom(msg.sender, address(this), _dai);
-                ICurveDeposit(yPool).add_liquidity([_dai,0,0,0], 0); // DAI => yDAI done by deposit contract
+                IERC20(DAI).safeTransferFrom(msg.sender, address(this), inAmount);
+                ICurveDeposit(yPool).add_liquidity([inAmount,0,0,0], 0); // DAI => yDAI done by deposit contract
                 // Update Y pool liquidity
-                yLiquidity = yLiquidity.add(_dai);
+                yLiquidity = yLiquidity.add(inAmount);
             }
         }
         // Emit event
-        emit Deposit(msg.sender, pool, _dai);
-        return success;
+        emit Deposit(msg.sender, pool, inAmount);
+        return true;
     }
 
     // 4 - Rebalance
     // Description: Remove liquidity from 1 curve pool and provides liquidity to another
     // to rebalance portfolio according to weights in actions 2
+
+    // TODO
+
+    // 2) Calculate % distribution of LP tokens
+    // 3) Readjust balance accordingly (remove_liquidity() & deposit(liquidity))
 
     /**
     * @notice Rebalances portfolio of LP tokens set by Admin
@@ -139,35 +146,45 @@ contract PortfolioManager {
     */
     function rebalance() public returns (bool) {
         // Calculates % allocation between susd and Y pool.
-        uint totalBalance = susdLiquidity.add(yLiquidity);
-        uint susdDAIPartition = (susdLiquidity.div(totalBalance)).mul(100);
-        uint yDAIPartition = (yLiquidity.div(totalBalance)).mul(100);
+        uint sCRV_Balance = IERC20(sCRV).balanceOf(address(this));
+        uint yCRV_Balance = IERC20(yCRV).balanceOf(address(this));
+        uint totalLP_Balance = sCRV_Balance.add(yCRV_Balance);
+        // ASSUME 1 sCRV = 1 yCRV (% = total * percentage / 100)
+        uint sCRV_Allocation = (totalLPBalance.mul(sCRV_Balance)).div(100);
+        uint yCRV_Allocation = (totalLPBalance.mul(yCRV_Balance)).div(100);
         // Compare % allocation with desired pool weights.
-        if (susdDAIPartition > susdWeight) {
-            // Calculate excess DAI
-            uint susdExcess = susdLiquidity.mul(uint(susdDAIPartition.sub(susdWeight))); 
-            // Withdraw DAI from susd pool
-            ICurveDeposit(susdPool).remove_liquidity(susdExcess, [0,0,0,0]);
-            // Reallocate DAI in Y pool via deposit
-            ICurveDeposit(yPool).add_liquidity([susdExcess,0,0,0], 0);
-            // Update liquidity pools
-            susdLiquidity = susdLiquidity.sub(susdExcess);
-            yLiquidity = yLiquidity.add(susdExcess);
+        if (sCRV_Allocation > susdWeight) {
+            // Calculate excess sCRV tokens
+            uint sCRV_Excess = totalLPBalance.div(sCRV_Allocation.sub(susdWeight));
+            // Withdraw sCRV from susd pool
+            ICurveDeposit(susdPool).remove_liquidity(sCRV_Excess, [0,0,0,0]);
+            // Reallocate DAI into Y pool
+            uint _dai = IERC20(DAI).balanceOf(address(this));
+            if (_dai >= sCRV_Excess){
+                // Deposit sCRV excess into Y Pool
+                ICurveDeposit(yCRV).add_liquidity([sCRV_Excess,0,0,0],0);
+                // Update liquidity pools
+                susdLiquidity = susdLiquidity.sub(sCRV_Excess);
+                yLiquidity = yLiquidity.add(sCRV_Excess);
+            }
             // Emit event
-            emit Rebalance(susdExcess, susdPool);
+            emit Rebalance(sCRV_Excess, susdPool);
         }
-        if (yDAIPartition > yWeight) {
-            // Calculate excess DAI
-            uint yExcess = yLiquidity.mul(int(yDAIPartition.sub(yWeight))); 
-            // WithdrawDAI from Y pool
-            ICurveDeposit(yPool).remove_liquidity(yExcess, [0,0,0,0]);
+        if (yCRV_Allocation > yWeight) {
+            // Calculate excess yCRV
+            uint yCRV_Excess = totalLPBalance.div(yCrv_Allocation.sub(yWeight));
+            // Withdraw yCRV from Y pool
+            ICurveDeposit(ypool).remove_liquidity(yCRV_Excess, [0,0,0,0]);
             // Reallocate DAI in susd pool via deposit
-            ICurveDeposit(susdPool).add_liquidity([yExcess,0,0,0],0);
-            // Update Liquidity pools
-            yLiquidity = yLiquidity.sub(yExcess);
-            susdLiquidity = susdLiquidity.add(yExcess);
-            // Emit Event
-            emit Rebalance(yExcess, yPool);
+            uint _dai = IERC20(DAI).balanceOf(address(this));
+            if (_dai >= yCRV_Excess) {
+                ICurveDeposit(yCRV).add_liquidity([sCRV_Excess,0,0,0],0);
+                // Update liquidity pools
+                susdLiquidity = susdLiquidity.sub(sCRV_Excess);
+                yLiquidity = yLiquidity.add(sCRV_Excess);
+            }
+            // Emit event
+            emit Rebalance(yCRV_Excess, yPool);
         }
         return true;
     }
@@ -195,4 +212,5 @@ contract PortfolioManager {
         whitelistedPools.push(pool);
         emit PoolWhitelisted(pool);
     }
+
 }
