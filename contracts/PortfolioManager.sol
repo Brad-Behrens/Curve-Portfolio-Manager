@@ -30,10 +30,6 @@ contract PortfolioManager is Ownable {
     uint public susdWeight;
     uint public yWeight;
 
-    // Pool DAI Liquidity
-    uint256 public susdLiquidity;
-    uint256 public yLiquidity;
-
     // EVENTS
     event PoolWhitelisted(address indexed pool);
     event PoolWeights(uint susdWeight, uint yWeight);
@@ -47,9 +43,6 @@ contract PortfolioManager is Ownable {
         // Init susd and Y pool weights
         susdWeight = _susdWeight;
         yWeight = _yWeight;
-        // Init pool liquidity
-        susdLiquidity = 0;
-        yLiquidity = 0;
         // Init verified pools (susd and Y pool only)
         verifiedPools.push(susdPool);
         verifiedPools.push(yPool);
@@ -105,25 +98,20 @@ contract PortfolioManager is Ownable {
     function addLiquidity(address pool, uint inAmount) public returns (bool) {
         // Verify pool address
         require(pool == susdPool || pool == yPool, "Error: Invalid pool address.")
-        // DAI balance in user address.
-        uint _dai = IERC20(DAI).balanceOf(msg.sender);
         // Deposit DAI in pools.
-        if (_dai > inAmount) {
-            // Deposit DAI in susd pool.
-            if (pool == susdPool) {
-                // susd pool deposit
-                IERC20(DAI).safeTransferFrom(msg.sender, address(this), inAmount);
-                ICurveDeposit(susdPool).add_liquidity([inAmount,0,0,0], 0);
-                // Update susd pool Liquidity
-                susdLiquidity = susdLiquidity.add(inAmount);
-            }
-            else if (pool == yPool){
-                // y pool deposit
-                IERC20(DAI).safeTransferFrom(msg.sender, address(this), inAmount);
-                ICurveDeposit(yPool).add_liquidity([inAmount,0,0,0], 0); // DAI => yDAI done by deposit contract
-                // Update Y pool liquidity
-                yLiquidity = yLiquidity.add(inAmount);
-            }
+        if (pool == susdPool) {
+            // susd pool deposit
+            IERC20(DAI).safeTransferFrom(msg.sender, address(this), inAmount);
+            IERC20(DAI).safeApprove(susdPool, 0);
+            IERC20(DAI).safeApprove(susdPool, inAmount);
+            ICurveDeposit(susdPool).add_liquidity([inAmount,0,0,0], 0);
+        }
+        else if (pool == yPool){
+            // y pool deposit
+            IERC20(DAI).safeTransferFrom(msg.sender, address(this), inAmount);
+            IERC20(DAI).safeApprove(yPool, 0);
+            IERC20(DAI).safeApprove(yPool, inAmount);
+            ICurveDeposit(yPool).add_liquidity([inAmount,0,0,0], 0); // DAI => yDAI done by deposit contract
         }
         // Emit event
         emit Deposit(msg.sender, pool, inAmount);
@@ -146,43 +134,39 @@ contract PortfolioManager is Ownable {
     */
     function rebalance() public returns (bool) {
         // Calculates % allocation between susd and Y pool.
+        // ASSUME 1 sCRV = 1 yCRV 
         uint sCRV_Balance = IERC20(sCRV).balanceOf(address(this));
         uint yCRV_Balance = IERC20(yCRV).balanceOf(address(this));
         uint totalLP_Balance = sCRV_Balance.add(yCRV_Balance);
-        // ASSUME 1 sCRV = 1 yCRV (% = total * percentage / 100)
-        uint sCRV_Allocation = (totalLPBalance.mul(sCRV_Balance)).div(100);
-        uint yCRV_Allocation = (totalLPBalance.mul(yCRV_Balance)).div(100);
+        uint sCRV_Ideal = totalLP_Balance.mul(susdWeight).div(100);
+        uint yCRV_Ideal = tottalLP_Balance.mul(yWeight).div(100);
         // Compare % allocation with desired pool weights.
-        if (sCRV_Allocation > susdWeight) {
+        if (sCRV_Balance > sCRV_Ideal) {
             // Calculate excess sCRV tokens
-            uint sCRV_Excess = totalLPBalance.div(sCRV_Allocation.sub(susdWeight));
+            uint sCRV_Excess = sCRV_Balance.sub(sCRVIdeal);
             // Withdraw sCRV from susd pool
-            ICurveDeposit(susdPool).remove_liquidity(sCRV_Excess, [0,0,0,0]);
+            ICurveDeposit(susdPool).remove_liquidity_one_coin(sCRV_Excess, int128(0), 0);
             // Reallocate DAI into Y pool
             uint _dai = IERC20(DAI).balanceOf(address(this));
-            if (_dai >= sCRV_Excess){
-                // Deposit sCRV excess into Y Pool
-                ICurveDeposit(yCRV).add_liquidity([sCRV_Excess,0,0,0],0);
-                // Update liquidity pools
-                susdLiquidity = susdLiquidity.sub(sCRV_Excess);
-                yLiquidity = yLiquidity.add(sCRV_Excess);
-            }
+            require(dai >= sCRV_Excess, "Error: Insufficient DAI to rebalance");
+            // Deposit sCRV excess into Y Pool
+            IERC20(DAI).safeApprove(susdPool, 0);
+            IERC20(DAI).safeApprove(susdPool, sCRV_Excess);
+            ICurveDeposit(yCRV).add_liquidity([sCRV_Excess,0,0,0],0);
             // Emit event
             emit Rebalance(sCRV_Excess, susdPool);
         }
-        if (yCRV_Allocation > yWeight) {
+        if (yCRV_Balance > yCRV_Ideal) {
             // Calculate excess yCRV
-            uint yCRV_Excess = totalLPBalance.div(yCrv_Allocation.sub(yWeight));
+            uint yCRV_Excess = yCRV_Balance.sub(yCRV_Ideal);
             // Withdraw yCRV from Y pool
-            ICurveDeposit(ypool).remove_liquidity(yCRV_Excess, [0,0,0,0]);
+            ICurveDeposit(yPool).remove_liquidity_one_coin(yCRV_Excess, int128(0), 0);
             // Reallocate DAI in susd pool via deposit
             uint _dai = IERC20(DAI).balanceOf(address(this));
-            if (_dai >= yCRV_Excess) {
-                ICurveDeposit(yCRV).add_liquidity([sCRV_Excess,0,0,0],0);
-                // Update liquidity pools
-                susdLiquidity = susdLiquidity.sub(sCRV_Excess);
-                yLiquidity = yLiquidity.add(sCRV_Excess);
-            }
+            require(dai >= yCRV_Excess, "Error: Insufficient DAI to rebalance");
+            IERC20(DAI).safeApprove(yPool, 0);
+            IERC20(DAI).safeApprove(yPool, yCRV_Excess);
+            ICurveDeposit(yCRV).add_liquidity([yCRV_Excess,0,0,0],0);
             // Emit event
             emit Rebalance(yCRV_Excess, yPool);
         }
@@ -192,16 +176,6 @@ contract PortfolioManager is Ownable {
     // Returns current pool weighting set by Admin.
     function getPoolWeights() public view returns (uint256, uint256) {
         return (susdWeight, yWeight);
-    }
-
-    // DAI balance of the susd pool.
-    function susdDAIBalance() public view returns (uint256) {
-        return susdLiquidity;
-    }
-
-    // DAI balance of the Y pool.
-    function yDAIBalance() public view returns (uint256) {
-        return yLiquidity;
     }
 
     // Function called internally to verify pool has not already been verified.
